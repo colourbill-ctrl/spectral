@@ -297,12 +297,31 @@ function populateSetup() {
   fillSelect('set-method', caps.methods, caps.methods.map(m=>METHOD_LABEL[m]||m));
   fillSelect('set-interp', caps.interp);
   fillSelect('set-extend', caps.extend);
-  // Initial illuminant list filtered by method
-  refreshIlluminants();
+  applyRecommendedDefaults();                 // ICC-recommended defaults for the loaded grid
+  refreshIlluminants();                       // filter illuminant list by method + set interp/extend state
+  selectIfPresent('set-illuminant', 'D50');
   document.getElementById('set-method').addEventListener('change', refreshIlluminants);
   document.getElementById('set-observer').addEventListener('change', refreshIlluminants);
   document.getElementById('set-method').addEventListener('change', updateMethodNote);
   updateMethodNote();
+}
+function selectIfPresent(id, value) {
+  const el = document.getElementById(id);
+  if ([...el.options].some(o => o.value === value)) el.value = value;
+}
+// Pick ICC-recommended Setup defaults for the loaded dataset (TN-06): D50 + 1931 2°,
+// and the Registry LWL table when the data sits on the registry's 380-780 nm / 10 nm
+// grid; otherwise the Weighting method with Sprague interpolation + Hold end handling.
+function applyRecommendedDefaults() {
+  savedInterp = savedExtend = null;           // clear carry-over from any prior load
+  const r = file.range;
+  const onRegistryGrid = r.step === 10 && (r.start % 10 === 0) && r.start <= 780 && r.end >= 380;
+  selectIfPresent('set-observer', '1931');
+  selectIfPresent('set-method', onRegistryGrid ? 'RegistryTable' : 'Weighting');
+  if (!onRegistryGrid) {
+    selectIfPresent('set-interp', 'Sprague');
+    selectIfPresent('set-extend', 'Hold');
+  }
 }
 function illumAvailable(name, method, obs) {
   const e = caps.illuminants[name];

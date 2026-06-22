@@ -5,15 +5,24 @@
 // import works under the CSP (same-origin 'self' + 'wasm-unsafe-eval'); no blob
 // shim is needed because we serve the glue raw (unlike Vite's /public rewrite).
 
+// Cache-bust token for the wasm/ assets. They are served with long-lived
+// `immutable` caching, so the filenames never change between deploys and a
+// returning browser would keep an old spectral.wasm. build-wasm.sh stamps the
+// wasm content hash here, giving each build a unique ?v= URL that bypasses the
+// stale cache while keeping the immutable caching benefit. ('dev' = unbuilt.)
+const WASM_VERSION = '63b24ba554e9';
+
 let modulePromise = null;
 
 export function loadModule() {
   if (!modulePromise) {
-    // No locateFile override: with EXPORT_ES6 the default resolves spectral.wasm
-    // relative to spectral.mjs's own URL (import.meta.url), so it works both at
-    // the dev root (/wasm/) and under the /spectral/ subpath in production.
-    modulePromise = import('./wasm/spectral.mjs')
-      .then(m => m.default())
+    // Resolve the wasm dir relative to this module's own URL so it works both at
+    // the dev root (/wasm/) and under the /spectral/ subpath in production. The
+    // ?v= token must be applied to BOTH the .mjs import and (via locateFile) the
+    // .wasm fetch — relative URL resolution inside the glue drops the query.
+    const wasmDir = new URL('./wasm/', import.meta.url);
+    modulePromise = import(`./wasm/spectral.mjs?v=${WASM_VERSION}`)
+      .then(m => m.default({ locateFile: (p) => new URL(p, wasmDir).href + `?v=${WASM_VERSION}` }))
       .catch(e => { modulePromise = null; throw e; });
   }
   return modulePromise;

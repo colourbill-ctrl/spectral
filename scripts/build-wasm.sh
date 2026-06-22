@@ -61,6 +61,14 @@ done
 
 cd "$OUT_DIR"
 sha256sum "${ARTIFACTS[@]}" > SHA256SUMS
+
+# Stamp the wasm content hash into spectral.js as the ?v= cache-bust token, so a
+# redeploy is fetched by returning browsers despite the immutable wasm/ caching
+# (the query changes even though the filename does not).
+WASM_HASH="$(cut -c1-12 < <(sha256sum "$OUT_DIR/spectral.wasm"))"
+sed -i -E "s/(const WASM_VERSION = ')[^']*(';)/\1${WASM_HASH}\2/" "$REPO_ROOT/public/spectral.js"
+echo "stamped WASM_VERSION=$WASM_HASH into public/spectral.js"
+
 echo
 echo "=== artifact checksums (public/wasm/SHA256SUMS) ==="
 cat SHA256SUMS
