@@ -1,0 +1,45 @@
+# Benchmark environment
+date: 2026-06-22T20:41Z
+kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+cpu: Intel(R) Core(TM) Ultra 7 155U
+compiler: Homebrew clang version 21.1.3
+
+=================================================================================
+ Spectral->XYZ kernel micro-benchmark  (NEW IccColorimetry #1503 vs ORIGINAL)
+=================================================================================
+
+[1] PER-PIXEL APPLY  (reflective & emissive use the SAME 3xN apply)
+    operator already built; this is the hot path of an image transform.
+  --- N=41 (10nm) ---
+  NEW  icApplyWeightingTable (branchless 3N)         54.85 ns/op       18.2 Mops/s
+  ORIG mpe VectorMult (3N + per-elem branch)         85.45 ns/op       11.7 Mops/s
+  --- N=81 (5nm, standard) ---
+  NEW  icApplyWeightingTable (branchless 3N)        106.71 ns/op        9.4 Mops/s
+  ORIG mpe VectorMult (3N + per-elem branch)        132.77 ns/op        7.5 Mops/s
+  --- N=401 (1nm) ---
+  NEW  icApplyWeightingTable (branchless 3N)        515.85 ns/op        1.9 Mops/s
+  ORIG mpe VectorMult (3N + per-elem branch)        604.05 ns/op        1.7 Mops/s
+
+[2] DONALDSON (bi-spectral / fluorescence) PER-PIXEL  -- NEW module has NO path
+    ORIG: per-pixel NxN matrix * illuminant (O(N^2)) + 3xN observer.
+  --- N=81 ---
+  ORIG donaldson dense  NxN + 3xN (O(N^2))         2514.78 ns/op        0.4 Mops/s
+  ORIG donaldson sparse K=659 (10% dense) + 3xN     349.06 ns/op        2.9 Mops/s
+  ORIG donaldson sparse K=1643 (25% dense) + 3xN    666.87 ns/op        1.5 Mops/s
+  (ref) ordinary reflective 3xN at same N            59.76 ns/op       16.7 Mops/s
+  --- N=401 ---
+  ORIG donaldson dense  NxN + 3xN (O(N^2))       112000.04 ns/op        0.0 Mops/s
+  ORIG donaldson sparse K=16081 (10% dense) + 3xN   7927.01 ns/op        0.1 Mops/s
+  ORIG donaldson sparse K=40201 (25% dense) + 3xN  24597.74 ns/op        0.0 Mops/s
+  (ref) ordinary reflective 3xN at same N           380.26 ns/op        2.6 Mops/s
+
+[3] ONE-TIME OPERATOR BUILD (Prepare)  -- amortized over all pixels
+  --- Nobs=81, Nmeas=81 (5nm observer) ---
+  NEW Prepare DirectSum  (O(Nmeas), linear)        2224.02 ns/op        0.4 Mops/s
+  NEW Prepare Weighting  (O(Nmeas*Nobs))          37928.40 ns/op        0.0 Mops/s
+  NEW Prepare Sprague    (O(Nmeas*Nobs))         102426.53 ns/op        0.0 Mops/s
+  --- Nobs=401 (1nm CMFs), Nmeas=41 (10nm data) ---
+  NEW Prepare Sprague@1nm (O(Nmeas*401))         247399.41 ns/op        0.0 Mops/s
+    -> apply afterwards is 3*Nmeas=123 FMA (operator size = 3x41), cheap.
+
+(sink=1.16579e+09)
