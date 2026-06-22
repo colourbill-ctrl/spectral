@@ -92,11 +92,14 @@
     font:inherit; padding:6px 8px; border:1px solid var(--border); border-radius:var(--radius);
     background:var(--surface); color:var(--text); width:100%;
   }
+  /* a control that is inactive for the current method (e.g. interp / end-handling under Registry LWL) */
+  select.inactive { background:var(--surface-alt); color:var(--muted); border-style:dashed; opacity:.65; cursor:not-allowed; }
   .note { font-size:12px; color:var(--muted); margin-top:10px; }
   .note.caveat { color:var(--warn); }
   .msg { padding:10px 12px; border-radius:var(--radius); margin-top:10px; font-size:12px; }
   .msg.err { background:rgba(192,57,43,.12); color:var(--err); }
   .msg.ok  { background:rgba(46,139,87,.12); color:var(--ok); }
+  .msg.warn{ background:rgba(184,134,11,.12); color:var(--warn); }
 
   .tablewrap { overflow:auto; max-height:62vh; border:1px solid var(--border); border-radius:var(--radius); }
   table.data { border-collapse:collapse; font-family:var(--font-mono); font-size:11px; white-space:nowrap; }
@@ -125,6 +128,63 @@
   .blade label.fld { display:block; margin-bottom:14px; }
   .blade label.fld span { display:block; color:var(--muted); margin-bottom:4px; font-size:12px; }
   body.blade-collapsed .blade .content { opacity:0; pointer-events:none; }
+
+  /* help toggle — a "?" tab directly below the settings gear */
+  .blade .help-toggle {
+    position:absolute; left:-1px; top:60px; transform:translateX(-100%);
+    appearance:none; font:inherit; font-size:15px; line-height:1.45;
+    background:var(--surface); color:var(--text);
+    border:1px solid var(--border); border-right:none;
+    border-radius:var(--radius) 0 0 var(--radius); padding:8px 11px; cursor:pointer;
+  }
+  .blade .help-toggle:hover { color:var(--accent); border-color:var(--accent); }
+
+  /* user guide drawer (slides in from the right, over everything) */
+  .help-backdrop {
+    position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:20;
+    opacity:0; pointer-events:none; transition:opacity .2s;
+  }
+  .help-backdrop.open { opacity:1; pointer-events:auto; }
+  .help-drawer {
+    position:fixed; top:0; right:0; height:100vh; width:min(640px,94vw);
+    background:var(--surface); border-left:1px solid var(--border); z-index:21;
+    transform:translateX(100%); transition:transform .25s ease;
+    display:flex; flex-direction:column; box-shadow:-6px 0 28px rgba(0,0,0,.22);
+  }
+  .help-drawer.open { transform:translateX(0); }
+  .help-drawer > header {
+    display:flex; align-items:center; justify-content:space-between; flex:none;
+    padding:16px 20px; border-bottom:1px solid var(--border);
+  }
+  .help-drawer > header h2 { margin:0; font-size:16px; }
+  .help-close {
+    appearance:none; font:inherit; font-size:20px; line-height:1; cursor:pointer;
+    background:var(--surface-alt); color:var(--text);
+    border:1px solid var(--border); border-radius:var(--radius); padding:4px 11px;
+  }
+  .help-close:hover { border-color:var(--accent); color:var(--accent); }
+  .help-body { padding:18px 22px 48px; overflow:auto; }
+  .help-body > p { margin:8px 0; }
+  .help-body h3 {
+    font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted);
+    margin:24px 0 8px; padding-bottom:5px; border-bottom:1px solid var(--border);
+  }
+  .help-body dt { font-weight:bold; margin-top:12px; }
+  .help-body dd { margin:3px 0 0; }
+  .help-body ul { margin:6px 0; padding-left:20px; }
+  .help-body li { margin:4px 0; }
+  .help-body code {
+    font-family:var(--font-mono); font-size:12px;
+    background:var(--surface-alt); border:1px solid var(--border);
+    border-radius:3px; padding:0 4px;
+  }
+  .help-body a { color:var(--accent-strong); }
+  .help-body .rec {
+    background:var(--accent-tint); border:1px solid var(--border);
+    border-radius:var(--radius); padding:10px 14px; margin:12px 0;
+  }
+  .help-body .rec ul { margin:6px 0 0; }
+  .help-body .caveat { color:var(--warn); font-size:12px; margin-top:14px; }
 </style>
 </head>
 <body>
@@ -218,6 +278,8 @@
 <!-- SETTINGS BLADE -->
 <aside class="blade" id="blade">
   <div class="toggle" id="blade-toggle" title="Settings">⚙</div>
+  <button class="help-toggle" id="help-toggle" type="button" title="User guide"
+          aria-label="User guide" aria-controls="help-drawer" aria-expanded="false">?</button>
   <div class="content">
     <h2>Settings</h2>
     <label class="fld">
@@ -228,6 +290,115 @@
         <option value="dark">Dark</option>
       </select>
     </label>
+  </div>
+</aside>
+
+<!-- USER GUIDE DRAWER -->
+<div class="help-backdrop" id="help-backdrop"></div>
+<aside class="help-drawer" id="help-drawer" role="dialog" aria-modal="true"
+       aria-labelledby="help-title" aria-hidden="true">
+  <header>
+    <h2 id="help-title">User guide</h2>
+    <button class="help-close" id="help-close" type="button" aria-label="Close user guide">×</button>
+  </header>
+  <div class="help-body">
+    <p>This app reads spectral measurements (CGATS, CSV, or CxF/X-3) and converts them to
+    CIE XYZ + L*a*b* using <strong>iccDEV's <code>IccColorimetry</code></strong> compiled to
+    WebAssembly. All colour math — spectral→XYZ and XYZ→Lab — is performed by iccDEV; JavaScript
+    only parses input and formats output, so the app exercises iccDEV's canonical math end to end.</p>
+
+    <h3>Setup controls</h3>
+    <dl>
+      <dt>Observer</dt>
+      <dd>The CIE standard colour-matching functions: <strong>1931 (2°)</strong> — the graphic-arts
+      and ICC default — or <strong>1964 (10°)</strong>, common in paper and display work.</dd>
+
+      <dt>Illuminant</dt>
+      <dd>The reference light the reflectance is viewed under. The available list depends on the
+      Method: the calculator methods offer the built-in SPDs <code>D50, D65, D93, A</code>; the
+      registry table offers the published tables <code>D50, D65, A, LED-B1, F11</code>. LED-B1 and
+      F11 exist <em>only</em> as registry tables (they have no built-in SPD).</dd>
+
+      <dt>Method</dt>
+      <dd>The spectral→XYZ reduction algorithm:
+        <ul>
+          <li><strong>Direct summation</strong> — naive rectangular sum at the measurement
+          interval (the existing iccMAX baseline; least accurate on coarse data).</li>
+          <li><strong>Weighting function</strong> — self-computed ASTM-style weights (WP56).
+          A good general choice when data is not on a 1 or 5 nm grid.</li>
+          <li><strong>Sprague → 1 nm</strong> — CIE 167:2005 Sprague reconstruction to 1 nm
+          before summation (highest fidelity for smooth reflectance).</li>
+          <li><strong>Registry LWL table (10 nm)</strong> — applies the ICC colorimetry-data
+          registry's published least-squares ("LWL", Li et al. 2016 / ISO 13655) weighting table
+          directly. Fixed grid <strong>380–780 nm @ 10 nm (41 bands)</strong>; your data must
+          already be on that grid — it does not resample. This is the registry's authoritative
+          result.</li>
+        </ul>
+      </dd>
+
+      <dt>Interpolation</dt>
+      <dd>How spectra are resampled onto the integration grid (<code>Linear</code> /
+      <code>Cubic</code> / <code>Sprague</code>). Disabled for the registry table, which maps
+      band-for-band and has nothing to interpolate.</dd>
+
+      <dt>End handling</dt>
+      <dd>How a spectrum is extended past its measured ends when the integration grid is wider:
+      <strong>Hold</strong> repeats the end value (ICC-recommended); <strong>Linear</strong>
+      extrapolates from the last two samples. Disabled for the registry table.</dd>
+
+      <dt>Reflectance scale</dt>
+      <dd>Input units only: <code>Auto-detect</code> (percent if any value &gt; 2, else fraction),
+      <code>0–1</code>, or <code>0–100</code>. This rescales the input before conversion; it does
+      <em>not</em> clip sample values — negative or &gt; 1 samples pass through unchanged.</dd>
+    </dl>
+
+    <h3>ICC-recommended settings</h3>
+    <p>Per <a href="https://www.color.org/technotes/ICC_TN-06-2025_Recommendations_on_calculation_of_tristimulus_values.pdf"
+    target="_blank" rel="noopener noreferrer">ICC TN-06-2025</a> (a local copy is bundled at
+    <code>docs/ICC_TN-06-2025.pdf</code>):</p>
+
+    <div class="rec">
+      <strong>For typical 10 nm reflectance data spanning 380–780 nm</strong> — the most
+      authoritative result:
+      <ul>
+        <li>Method = <strong>Registry LWL table (10 nm)</strong> — TN-06 §5 calls the registry's
+        least-squares weighting functions the state of the art.</li>
+        <li>Observer = <strong>1931 (2°)</strong> — for ICC.1 / graphic-arts compatibility.</li>
+        <li>Illuminant = <strong>D50</strong> — the ICC.1 PCS illuminant. With spectra in hand,
+        use D50 directly rather than chromatically adapting from another illuminant.</li>
+      </ul>
+    </div>
+
+    <div class="rec">
+      <strong>If your data is not on the 380–780 / 10 nm grid</strong> (e.g. 5 nm, or 380–730 nm):
+      <ul>
+        <li>Method = <strong>Weighting</strong> (or <strong>Sprague → 1 nm</strong>) — TN-06 §4:
+        use a weighting function for non-1/5 nm intervals; otherwise interpolate to 1 nm with
+        Sprague.</li>
+        <li>End handling = <strong>Hold</strong> — TN-06 §3: extend the measured data to the
+        function range by holding the last known value (not linear, not higher-order).</li>
+        <li>Interpolation = <strong>Sprague</strong> when using the Sprague method.</li>
+      </ul>
+    </div>
+
+    <p class="caveat">Caveats: the 10 nm registry tables are <strong>provisional</strong> (pending
+    CIE TC1-101) and carry the registry's <strong>Y = 100</strong> normalization, whereas the
+    calculator methods use relative <strong>Y = 1</strong>. L*a*b* is correct under either, because
+    it is computed against the adopted white from the same path. No spectral values are clipped:
+    negatives (noise/fluorescence) and values &gt; 1 (emissive/scene) are preserved as measured.</p>
+
+    <h3>Authoritative source</h3>
+    <p>The algorithms and weighting tables used here come from the
+    <a href="https://registry.color.org/colorimetry-data/" target="_blank" rel="noopener noreferrer">ICC
+    colorimetry-data registry</a> — the authoritative source (380–780 nm @ 10 nm; tables computed
+    for ICC by Tanzima Habib, NTNU).</p>
+
+    <h3>Benchmark vs. existing iccDEV computations</h3>
+    <p id="benchmark-note">A benchmark comparing the new <code>IccColorimetry</code> spectral→XYZ
+    kernels against iccDEV's existing evaluation kernels (reflective, emissive, and Donaldson
+    paths) is <strong>in progress</strong>. The harness lives at
+    <code>benchmarks/colorimetry-bench.cpp</code> and the write-up will be published in this
+    repository under <code>benchmarks/</code>.</p>
   </div>
 </aside>
 

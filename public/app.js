@@ -26,6 +26,24 @@ document.getElementById('blade-toggle').addEventListener('click', () => {
   localStorage.setItem(BLADE_KEY, c ? '1' : '0');
 });
 
+// User guide drawer (the "?" tab below the gear)
+const helpDrawer = document.getElementById('help-drawer');
+const helpBackdrop = document.getElementById('help-backdrop');
+const helpToggle = document.getElementById('help-toggle');
+function setHelp(open) {
+  helpDrawer.classList.toggle('open', open);
+  helpBackdrop.classList.toggle('open', open);
+  helpDrawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+  helpToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  (open ? document.getElementById('help-close') : helpToggle).focus();
+}
+helpToggle.addEventListener('click', () => setHelp(true));
+document.getElementById('help-close').addEventListener('click', () => setHelp(false));
+helpBackdrop.addEventListener('click', () => setHelp(false));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && helpDrawer.classList.contains('open')) setHelp(false);
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tabs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -300,10 +318,30 @@ function refreshIlluminants() {
   sel.innerHTML = '';
   names.forEach(n => { const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
   if (names.includes(prev)) sel.value = prev;
-  // Registry table is fixed-grid + no interp/extend; disable those controls.
+  updateInterpExtendState(method);
+}
+
+// For the Registry LWL table there is no resampling and no user-chosen end handling:
+// Interpolation reads "N/A" and End handling is forced to Hold (the wrapper holds any
+// missing end bands per ICC TN-06). Both controls are shown inactive.
+let savedInterp = null, savedExtend = null;
+function updateInterpExtendState(method) {
   const reg = method === 'RegistryTable';
-  document.getElementById('set-interp').disabled = reg;
-  document.getElementById('set-extend').disabled = reg;
+  const interp = document.getElementById('set-interp');
+  const extend = document.getElementById('set-extend');
+  if (reg) {
+    if (savedInterp === null) savedInterp = interp.value;
+    if (savedExtend === null) savedExtend = extend.value;
+    fillSelect('set-interp', ['N/A']);
+    extend.value = 'Hold';
+  } else {
+    if (savedInterp !== null) { fillSelect('set-interp', caps.interp); interp.value = savedInterp; savedInterp = null; }
+    if (savedExtend !== null) { extend.value = savedExtend; savedExtend = null; }
+  }
+  interp.disabled = reg;
+  extend.disabled = reg;
+  interp.classList.toggle('inactive', reg);
+  extend.classList.toggle('inactive', reg);
 }
 function updateMethodNote() {
   const method = document.getElementById('set-method').value;
@@ -318,11 +356,17 @@ function updateMethodNote() {
 }
 
 function gatherSettings() {
+  const method = document.getElementById('set-method').value;
+  // Under Registry LWL the Interpolation control shows "N/A" (that path doesn't
+  // resample); send the underlying choice so the request still carries a valid enum.
+  const interp = method === 'RegistryTable'
+    ? (savedInterp || 'Sprague')
+    : document.getElementById('set-interp').value;
   return {
     observer:   document.getElementById('set-observer').value,
     illuminant: document.getElementById('set-illuminant').value,
-    method:     document.getElementById('set-method').value,
-    interp:     document.getElementById('set-interp').value,
+    method,
+    interp,
     extend:     document.getElementById('set-extend').value,
     kind:       'reflectance',
     scale:      document.getElementById('set-scale').value,
@@ -350,7 +394,8 @@ async function runConvert(msgId) {
   try {
     const r = await convertSpectral(req);
     result = { ...r, settings, divisor };
-    setMsg(msgId, `Converted ${data.length} patches via ${settings.method} (${settings.observer}, ${settings.illuminant}). Normalization ${r.normalization}.`, 'ok');
+    const warn = (r.warnings && r.warnings.length) ? ' ' + r.warnings.join(' ') : '';
+    setMsg(msgId, `Converted ${data.length} patches via ${settings.method} (${settings.observer}, ${settings.illuminant}). Normalization ${r.normalization}.${warn}`, warn ? 'warn' : 'ok');
     renderDataTable();
     document.getElementById('btn-download').disabled = false;
     showTab('data');

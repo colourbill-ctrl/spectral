@@ -229,24 +229,71 @@ static std::string convertSpectral(const std::string& reqJson) {
     if (!w)
       return errObj("no registry weighting table for observer " + obsS +
                     " + illuminant " + illumS).dump();
-    // The table is defined on a fixed grid (380-780 @ 10 nm = 41 bands); the
-    // measurement data must already be on that grid (icApplyWeightingTable maps
-    // band-for-band, it does not resample).
-    double tStart = icF16toF(tblRange.start), tEnd = icF16toF(tblRange.end);
-    if ((int)tblRange.steps != steps ||
-        std::fabs(tStart - startNm) > 0.5 || std::fabs(tEnd - endNm) > 0.5) {
-      char buf[160];
+
+    // The table is on a fixed grid (380-780 @ 10 nm = 41 bands). icApplyWeightingTable
+    // maps band-for-band and does NOT resample, so the data must share the table's
+    // interval and be aligned to its grid. We do not interpolate. If the data covers
+    // only a sub-range of the table, the missing end band(s) are filled by holding the
+    // nearest measured value -- constant extrapolation, per ICC TN-06 section 3 -- so
+    // e.g. 380-730 nm @ 10 nm data is auto-extended across 740-780 nm.
+    const int    tblSteps = (int)tblRange.steps;
+    const double tStart   = icF16toF(tblRange.start), tEnd = icF16toF(tblRange.end);
+    const double tblStep  = (tblSteps > 1) ? (tEnd - tStart) / (tblSteps - 1) : 0.0;
+    const double dataStep = (steps   > 1) ? (endNm - startNm) / (steps   - 1) : 0.0;
+
+    // Data must match the table interval and start on one of its bands. shift is the
+    // table->data index offset: data index for table band m is (m + shift).
+    const double shiftReal = (tblStep > 0) ? (tStart - startNm) / tblStep : 0.0;
+    const long   shift     = std::lround(shiftReal);
+    if (steps < 2 || tblStep <= 0 ||
+        std::fabs(dataStep - tblStep) > 0.5 ||
+        std::fabs(shiftReal - (double)shift) > 0.05) {
+      char buf[220];
       snprintf(buf, sizeof(buf),
-               "RegistryTable requires data on %.0f-%.0f nm @ %u bands; got %.0f-%.0f nm @ %d bands. "
-               "Resample, or use the Weighting/Sprague method.",
-               tStart, tEnd, (unsigned)tblRange.steps, startNm, endNm, steps);
+               "RegistryTable needs data on the %.0f-%.0f nm / %.0f nm grid and aligned to it; "
+               "got %.0f-%.0f nm @ %d bands (%.2f nm step). Resample, or use the Weighting/Sprague method.",
+               tStart, tEnd, tblStep, startNm, endNm, steps, dataStep);
       return errObj(buf).dump();
     }
+    if (endNm < tStart - 0.5 || startNm > tEnd + 0.5)
+      return errObj("RegistryTable: measurement range does not overlap the registry grid").dump();
+
     normalization = "Y=100";
-    icApplyWeightingTable(tblRange, w, unit.data(), whiteXYZ);  // adopted white (Y~100)
+
+    // Map each table band m to data index (m + shift), holding the nearest end value
+    // for bands that fall outside the measured range.
+    auto holdToGrid = [&](const std::vector<icFloatNumber>& src, std::vector<icFloatNumber>& dst) {
+      dst.resize(tblSteps);
+      for (int m = 0; m < tblSteps; ++m) {
+        long j = (long)m + shift;
+        if (j < 0) j = 0; else if (j >= steps) j = steps - 1;
+        dst[m] = src[(size_t)j];
+      }
+    };
+
+    // Warn (once) if any bands had to be held to fill the grid.
+    int heldLow = 0, heldHigh = 0;
+    for (int m = 0; m < tblSteps; ++m) {
+      long j = (long)m + shift;
+      if (j < 0) ++heldLow; else if (j >= steps) ++heldHigh;
+    }
+    if (heldLow || heldHigh) {
+      char buf[240];
+      snprintf(buf, sizeof(buf),
+               "Held the nearest measured value to fill %d band(s) at the short end and %d at the "
+               "long end of the %.0f-%.0f nm registry grid (constant extrapolation, ICC TN-06).",
+               heldLow, heldHigh, tStart, tEnd);
+      warnings.push_back(std::string(buf));
+    }
+
+    std::vector<icFloatNumber> unitFull((size_t)tblSteps, (icFloatNumber)1.0);  // perfect diffuser on the table grid
+    icApplyWeightingTable(tblRange, w, unitFull.data(), whiteXYZ);              // adopted white (Y~100)
+
+    std::vector<icFloatNumber> padded;
     for (const auto& row : rows) {
+      holdToGrid(row, padded);
       icFloatNumber xyz[3];
-      icApplyWeightingTable(tblRange, w, row.data(), xyz);
+      icApplyWeightingTable(tblRange, w, padded.data(), xyz);
       finishRow(xyz);
     }
   } else if (kindS == "emissive") {
