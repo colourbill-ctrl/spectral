@@ -9,8 +9,11 @@ let modulePromise = null;
 
 export function loadModule() {
   if (!modulePromise) {
+    // No locateFile override: with EXPORT_ES6 the default resolves spectral.wasm
+    // relative to spectral.mjs's own URL (import.meta.url), so it works both at
+    // the dev root (/wasm/) and under the /spectral/ subpath in production.
     modulePromise = import('./wasm/spectral.mjs')
-      .then(m => m.default({ locateFile: (p) => '/wasm/' + p }))
+      .then(m => m.default())
       .catch(e => { modulePromise = null; throw e; });
   }
   return modulePromise;
