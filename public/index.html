@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- CSP for static (nginx) serving: all logic is in external app.js / spectral.js,
+     so no 'unsafe-inline' for scripts. 'wasm-unsafe-eval' is required by Emscripten.
+     blob: is kept on connect-src for the export Blob download. -->
+<!-- frame-ancestors is intentionally omitted: it is ignored inside <meta> and
+     must be sent as an HTTP header (helmet does this in dev; add it / X-Frame-Options
+     to the nginx block in prod). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
+<title>spectral — spectral-to-colorimetry</title>
+<style>
+  :root {
+    --page-bg:#f0f2f5; --surface:#ffffff; --surface-alt:#f8fafd; --border:#d7dde6;
+    --text:#333; --muted:#6b7480; --accent:#4a90e2; --accent-tint:#eef5fd;
+    --accent-strong:#2a6ab5; --ok:#2e8b57; --warn:#b8860b; --err:#c0392b;
+    --radius:6px; --radius-lg:10px;
+    --font-sans:Arial,'Helvetica Neue',Helvetica,system-ui,sans-serif;
+    --font-mono:'SF Mono',Menlo,Consolas,monospace;
+  }
+  body.dark {
+    --page-bg:#1a1b1e; --surface:#242529; --surface-alt:#2b2d31; --border:#3a3d42;
+    --text:#d6d6d6; --muted:#9aa0a8; --accent:#6aacf0; --accent-tint:#22303f;
+    --accent-strong:#8cc0f5; --ok:#5cc98a; --warn:#e0b24a; --err:#e06b5b;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--page-bg); color:var(--text);
+    font-family:var(--font-sans); font-size:13px; line-height:1.45;
+    padding-right:230px; transition:padding-right .2s;
+  }
+  body.blade-collapsed { padding-right:46px; }
+  .wrap { max-width:980px; margin:0 auto; padding:18px 20px 60px; }
+  header.app { margin-bottom:14px; }
+  header.app h1 { margin:0; font-size:22px; letter-spacing:.5px; }
+  header.app .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+  header.app .sub code { font-family:var(--font-mono); }
+
+  nav.tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:16px; }
+  nav.tabs button {
+    appearance:none; border:none; background:none; color:var(--muted);
+    font:inherit; padding:9px 16px; cursor:pointer; border-bottom:2px solid transparent;
+    margin-bottom:-1px; border-radius:var(--radius) var(--radius) 0 0;
+  }
+  nav.tabs button:hover { color:var(--text); background:var(--surface-alt); }
+  nav.tabs button.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:bold; }
+  nav.tabs button:disabled { opacity:.4; cursor:not-allowed; }
+
+  .panel { display:none; }
+  .panel.active { display:block; }
+
+  .card {
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg);
+    padding:18px; margin-bottom:16px;
+  }
+  .card h2 { margin:0 0 12px; font-size:15px; }
+  .card h3 { margin:18px 0 8px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
+
+  /* dropzone */
+  .zone {
+    border:2px dashed var(--border); background:var(--surface-alt); border-radius:var(--radius-lg);
+    padding:40px 24px; text-align:center; cursor:pointer; transition:border-color .15s,background .15s;
+  }
+  .zone:hover { border-color:var(--accent); background:var(--accent-tint); }
+  .zone.dragging { border-color:var(--accent); background:var(--accent-tint); }
+  .zone .icon { font-size:34px; }
+  .zone .headline { font-size:15px; font-weight:bold; margin:8px 0 4px; }
+  .zone .hint { color:var(--muted); font-size:12px; }
+  .zone input { display:none; }
+
+  button.btn {
+    appearance:none; font:inherit; cursor:pointer; padding:8px 16px; border-radius:var(--radius);
+    border:1px solid var(--border); background:var(--surface-alt); color:var(--text);
+  }
+  button.btn:hover { border-color:var(--accent); }
+  button.btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:bold; }
+  button.btn.primary:hover { background:var(--accent-strong); }
+  button.btn:disabled { opacity:.45; cursor:not-allowed; }
+
+  table.kv { border-collapse:collapse; width:100%; }
+  table.kv td { padding:3px 10px 3px 0; vertical-align:top; }
+  table.kv td.k { color:var(--muted); white-space:nowrap; width:1%; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:4px; }
+  .chip { background:var(--accent-tint); color:var(--accent-strong); border-radius:12px; padding:1px 9px; font-size:11px; }
+  .chip.discard { background:var(--surface-alt); color:var(--muted); text-decoration:line-through; }
+
+  .grid { display:grid; grid-template-columns:160px 1fr; gap:10px 14px; align-items:center; }
+  .grid label { color:var(--muted); }
+  select, input[type=text], input[type=number] {
+    font:inherit; padding:6px 8px; border:1px solid var(--border); border-radius:var(--radius);
+    background:var(--surface); color:var(--text); width:100%;
+  }
+  .note { font-size:12px; color:var(--muted); margin-top:10px; }
+  .note.caveat { color:var(--warn); }
+  .msg { padding:10px 12px; border-radius:var(--radius); margin-top:10px; font-size:12px; }
+  .msg.err { background:rgba(192,57,43,.12); color:var(--err); }
+  .msg.ok  { background:rgba(46,139,87,.12); color:var(--ok); }
+
+  .tablewrap { overflow:auto; max-height:62vh; border:1px solid var(--border); border-radius:var(--radius); }
+  table.data { border-collapse:collapse; font-family:var(--font-mono); font-size:11px; white-space:nowrap; }
+  table.data th, table.data td { padding:3px 8px; border-bottom:1px solid var(--border); text-align:right; }
+  table.data th {
+    position:sticky; top:0; background:var(--surface-alt); color:var(--muted);
+    font-family:var(--font-sans); text-align:right; z-index:1;
+  }
+  table.data th.lbl, table.data td.lbl { text-align:left; }
+  table.data td.col { color:var(--accent-strong); }
+  table.data th.calc, table.data td.calc { background:var(--accent-tint); }
+  table.data th.calc { color:var(--accent-strong); }
+
+  /* settings blade */
+  .blade {
+    position:fixed; top:0; right:0; width:230px; height:100vh; background:var(--surface);
+    border-left:1px solid var(--border); padding:16px; transition:transform .2s; z-index:10;
+  }
+  body.blade-collapsed .blade { transform:translateX(184px); }
+  .blade .toggle {
+    position:absolute; left:-1px; top:14px; transform:translateX(-100%);
+    background:var(--surface); border:1px solid var(--border); border-right:none;
+    border-radius:var(--radius) 0 0 var(--radius); padding:8px 10px; cursor:pointer; font-size:15px;
+  }
+  .blade h2 { margin:0 0 12px; font-size:13px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); }
+  .blade label.fld { display:block; margin-bottom:14px; }
+  .blade label.fld span { display:block; color:var(--muted); margin-bottom:4px; font-size:12px; }
+  body.blade-collapsed .blade .content { opacity:0; pointer-events:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="app">
+    <h1>spectral</h1>
+    <div class="sub">Spectral-to-colorimetry via iccDEV <code>IccColorimetry</code> (WASM) ·
+      <span id="lib-ver">…</span></div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="load" class="active">Load</button>
+    <button data-tab="setup" id="tab-setup" disabled>Setup</button>
+    <button data-tab="data"  id="tab-data"  disabled>Data</button>
+    <button data-tab="output" id="tab-output" disabled>Output</button>
+  </nav>
+
+  <!-- LOAD -->
+  <section class="panel active" data-panel="load">
+    <div class="card">
+      <div class="zone" id="zone">
+        <div class="icon">🌈</div>
+        <div class="headline">Drop a spectral dataset here</div>
+        <div class="hint">CGATS (.txt), CSV, or CxF/X-3 — or click to choose</div>
+        <input type="file" id="file-input" accept=".txt,.csv,.cgats,.cxf,.xml">
+      </div>
+      <div id="load-summary"></div>
+    </div>
+  </section>
+
+  <!-- SETUP -->
+  <section class="panel" data-panel="setup">
+    <div class="card">
+      <h2>Conversion parameters</h2>
+      <div class="grid">
+        <label for="set-observer">Observer</label>
+        <select id="set-observer"></select>
+        <label for="set-illuminant">Illuminant</label>
+        <select id="set-illuminant"></select>
+        <label for="set-method">Method</label>
+        <select id="set-method"></select>
+        <label for="set-interp">Interpolation</label>
+        <select id="set-interp"></select>
+        <label for="set-extend">End handling</label>
+        <select id="set-extend"></select>
+        <label for="set-scale">Reflectance scale</label>
+        <select id="set-scale">
+          <option value="auto">Auto-detect</option>
+          <option value="1">0–1 (fraction)</option>
+          <option value="100">0–100 (percent)</option>
+        </select>
+      </div>
+      <div id="method-note" class="note"></div>
+      <div id="caveat" class="note caveat"></div>
+      <div style="margin-top:16px"><button class="btn primary" id="btn-convert">Convert</button></div>
+      <div id="setup-msg"></div>
+    </div>
+  </section>
+
+  <!-- DATA -->
+  <section class="panel" data-panel="data">
+    <div class="card">
+      <h2>Data <span id="data-meta" style="font-weight:normal;color:var(--muted);font-size:12px"></span></h2>
+      <div class="tablewrap"><table class="data" id="data-table"></table></div>
+    </div>
+  </section>
+
+  <!-- OUTPUT -->
+  <section class="panel" data-panel="output">
+    <div class="card">
+      <h2>Output</h2>
+      <div class="grid">
+        <label for="out-name">File name</label>
+        <input type="text" id="out-name">
+        <label for="out-decimals">Decimal places</label>
+        <input type="number" id="out-decimals" min="0" max="10" value="4">
+        <label for="out-format">Format</label>
+        <select id="out-format"></select>
+        <label for="out-spectral">Include spectral</label>
+        <span><input type="checkbox" id="out-spectral"> keep the input spectral columns in the output</span>
+      </div>
+      <div style="margin-top:16px">
+        <button class="btn primary" id="btn-convert2">Convert</button>
+        <button class="btn" id="btn-download" disabled>Download</button>
+      </div>
+      <div id="output-msg"></div>
+    </div>
+  </section>
+</div>
+
+<!-- SETTINGS BLADE -->
+<aside class="blade" id="blade">
+  <div class="toggle" id="blade-toggle" title="Settings">⚙</div>
+  <div class="content">
+    <h2>Settings</h2>
+    <label class="fld">
+      <span>Appearance</span>
+      <select id="theme">
+        <option value="system">System</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  </div>
+</aside>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

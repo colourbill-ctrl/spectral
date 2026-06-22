@@ -1,0 +1,14 @@
+{
+  "name": "spectral",
+  "version": "0.1.0",
+  "description": "Spectral-to-colorimetry test app — drives iccDEV's IccColorimetry via WASM",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build:wasm": "scripts/build-wasm.sh"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "helmet": "^8.1.0"
+  }
+}
