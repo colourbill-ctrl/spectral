@@ -1,6 +1,6 @@
 {
   "name": "spectral",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Spectral-to-colorimetry test app — drives iccDEV's IccColorimetry via WASM",
   "main": "server.js",
   "scripts": {

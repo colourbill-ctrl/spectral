@@ -1,6 +1,6 @@
 # Spectral→colorimetry performance benchmark
 
-Performance complement to this project's accuracy validation (the FOGRA51 ΔE figures
+Performance complement to this project's accuracy cross-check (the FOGRA51 ΔE figures
 in the top-level README). It compares the **new `IccColorimetry` reduction path
 (#1503)** — the same module this app compiles to WASM — against the **original iccDEV
 spectral evaluation path** that predates it, across **reflective, emissive, and

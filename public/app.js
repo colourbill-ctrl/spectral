@@ -1,4 +1,4 @@
-import { getCapabilities, convertSpectral, preload } from './spectral.js';
+import { getCapabilities, convertSpectral, getRegistryTable, preload } from './spectral.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Theme (light/dark/system) — localStorage + prefers-color-scheme listener.
@@ -170,6 +170,7 @@ function isColorant(h){ return !isSpectral(h) && !isLabel(h) && !isColorimetryOr
 let caps = null;
 let file = null;     // { name, format, baseName, ext, headers, rows, keepIdx, labelIdx, colorantIdx, spectral:[{nm,idx}], range, maxRefl }
 let result = null;   // { xyz, lab, whiteXYZ, normalization, settings }
+let loadedTable = null;  // { fileName, start, end, steps, step, rows:[{nm,wx,wy,wz}], weights:[Wx...,Wy...,Wz...] }
 
 function setMsg(id, text, kind) {
   const el = document.getElementById(id);
@@ -290,21 +291,30 @@ function fillSelect(id, values, labels) {
   sel.innerHTML = '';
   values.forEach((v, i) => { const o=document.createElement('option'); o.value=v; o.textContent=labels?labels[i]:v; sel.appendChild(o); });
 }
+const METHOD_LABEL = { DirectSum:'Direct summation', Weighting:'Weighting function',
+  Sprague:'Sprague → 1 nm', RegistryTable:'Registry LWL table (10 nm)',
+  LoadTable:'Loaded weight table' };
+let setupWired = false;
 function populateSetup() {
   const OBS_LABEL = { '1931':'CIE 1931 2°', '1964':'CIE 1964 10°' };
   fillSelect('set-observer', caps.observers, caps.observers.map(o=>OBS_LABEL[o]||o));
-  const METHOD_LABEL = { DirectSum:'Direct summation', Weighting:'Weighting function', Sprague:'Sprague → 1 nm', RegistryTable:'Registry LWL table (10 nm)' };
   fillSelect('set-method', caps.methods, caps.methods.map(m=>METHOD_LABEL[m]||m));
   fillSelect('set-interp', caps.interp);
   fillSelect('set-extend', caps.extend);
   applyRecommendedDefaults();                 // ICC-recommended defaults for the loaded grid
   refreshIlluminants();                       // filter illuminant list by method + set interp/extend state
   selectIfPresent('set-illuminant', 'D50');
-  document.getElementById('set-method').addEventListener('change', refreshIlluminants);
-  document.getElementById('set-observer').addEventListener('change', refreshIlluminants);
-  document.getElementById('set-method').addEventListener('change', updateMethodNote);
+  if (!setupWired) {                          // wire the static Setup controls exactly once
+    setupWired = true;
+    document.getElementById('set-method').addEventListener('change', onMethodChange);
+    document.getElementById('set-observer').addEventListener('change', () => { refreshIlluminants(); refreshRegistryTable(); });
+    document.getElementById('set-illuminant').addEventListener('change', refreshRegistryTable);
+  }
   updateMethodNote();
+  refreshRegistryTable();
+  renderLoadedTable();
 }
+function onMethodChange() { refreshIlluminants(); updateMethodNote(); refreshRegistryTable(); }
 function selectIfPresent(id, value) {
   const el = document.getElementById(id);
   if ([...el.options].some(o => o.value === value)) el.value = value;
@@ -313,7 +323,7 @@ function selectIfPresent(id, value) {
 // and the Registry LWL table when the data sits on the registry's 380-780 nm / 10 nm
 // grid; otherwise the Weighting method with Sprague interpolation + Hold end handling.
 function applyRecommendedDefaults() {
-  savedInterp = savedExtend = null;           // clear carry-over from any prior load
+  savedInterp = null;                         // clear carry-over from any prior load
   const r = file.range;
   const onRegistryGrid = r.step === 10 && (r.start % 10 === 0) && r.start <= 780 && r.end >= 380;
   selectIfPresent('set-observer', '1931');
@@ -326,7 +336,11 @@ function applyRecommendedDefaults() {
 function illumAvailable(name, method, obs) {
   const e = caps.illuminants[name];
   if (!e) return false;
-  return method === 'RegistryTable' ? !!(e.registry && e.registry[obs]) : !!e.builtin;
+  // Both table methods reference a registry table: RegistryTable converts with it, and
+  // LoadTable uses Observer+Illuminant only to pick which Registry LWL table is shown
+  // for comparison (the loaded table folds its own observer/illuminant in).
+  const tableMethod = method === 'RegistryTable' || method === 'LoadTable';
+  return tableMethod ? !!(e.registry && e.registry[obs]) : !!e.builtin;
 }
 function refreshIlluminants() {
   const method = document.getElementById('set-method').value;
@@ -340,27 +354,22 @@ function refreshIlluminants() {
   updateInterpExtendState(method);
 }
 
-// For the Registry LWL table there is no resampling and no user-chosen end handling:
-// Interpolation reads "N/A" and End handling is forced to Hold (the wrapper holds any
-// missing end bands per ICC TN-06). Both controls are shown inactive.
-let savedInterp = null, savedExtend = null;
+// The table methods (Registry LWL + Loaded table) apply a fixed weighting table
+// band-for-band and do NOT resample, so Interpolation reads "N/A". End handling IS a
+// user choice for them — the app extends the data to the table grid (Hold = constant,
+// Linear = extrapolate) before applying the table, exactly as for the calculator methods.
+let savedInterp = null;
 function updateInterpExtendState(method) {
-  const reg = method === 'RegistryTable';
+  const tableMethod = method === 'RegistryTable' || method === 'LoadTable';
   const interp = document.getElementById('set-interp');
-  const extend = document.getElementById('set-extend');
-  if (reg) {
+  if (tableMethod) {
     if (savedInterp === null) savedInterp = interp.value;
-    if (savedExtend === null) savedExtend = extend.value;
     fillSelect('set-interp', ['N/A']);
-    extend.value = 'Hold';
-  } else {
-    if (savedInterp !== null) { fillSelect('set-interp', caps.interp); interp.value = savedInterp; savedInterp = null; }
-    if (savedExtend !== null) { extend.value = savedExtend; savedExtend = null; }
+  } else if (savedInterp !== null) {
+    fillSelect('set-interp', caps.interp); interp.value = savedInterp; savedInterp = null;
   }
-  interp.disabled = reg;
-  extend.disabled = reg;
-  interp.classList.toggle('inactive', reg);
-  extend.classList.toggle('inactive', reg);
+  interp.disabled = tableMethod;
+  interp.classList.toggle('inactive', tableMethod);
 }
 function updateMethodNote() {
   const method = document.getElementById('set-method').value;
@@ -369,16 +378,22 @@ function updateMethodNote() {
     Weighting:'Self-computed triangular/ASTM weights (WP56 eqn 2). Recommended for non-1/5 nm data.',
     Sprague:'CIE 167:2005 Sprague reconstruction to 1 nm before summation.',
     RegistryTable:`ICC colorimetry-data registry LWL table. Fixed grid ${caps.registryGrid.start}–${caps.registryGrid.end} nm @ ${caps.registryGrid.step} nm (${caps.registryGrid.bands} bands).`,
+    LoadTable:'Applies the table loaded below via iccDEV’s icXYZCalcLoadedTable. Your data must sit on the loaded table’s grid (end bands are extended per End handling). Observer/Illuminant only choose which Registry LWL table is shown for comparison — they do not affect this conversion.',
   };
   document.getElementById('method-note').textContent = NOTE[method] || '';
-  document.getElementById('caveat').textContent = method === 'RegistryTable' ? caps.registryNote : '';
+  const CAVEAT = {
+    RegistryTable: caps.registryNote,
+    LoadTable: 'Normalization follows the loaded table (its own Y scale); L*a*b* is correct regardless because the adopted white is derived from the same table.',
+  };
+  document.getElementById('caveat').textContent = CAVEAT[method] || '';
 }
 
 function gatherSettings() {
   const method = document.getElementById('set-method').value;
-  // Under Registry LWL the Interpolation control shows "N/A" (that path doesn't
+  // Under the table methods the Interpolation control shows "N/A" (they don't
   // resample); send the underlying choice so the request still carries a valid enum.
-  const interp = method === 'RegistryTable'
+  const tableMethod = method === 'RegistryTable' || method === 'LoadTable';
+  const interp = tableMethod
     ? (savedInterp || 'Sprague')
     : document.getElementById('set-interp').value;
   return {
@@ -393,11 +408,134 @@ function gatherSettings() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Weighting tables (Registry LWL display + loaded-table CSV)
+// ─────────────────────────────────────────────────────────────────────────────
+function fmtNm(nm) { return Number.isInteger(nm) ? String(nm) : nm.toFixed(1); }
+// Fractional digits needed to show `v` at ~6 significant figures (capped at 8).
+function fracDigits(v) {
+  if (!Number.isFinite(v)) return 0;
+  let x = Math.abs(+v.toPrecision(6)), d = 0;
+  while (d < 8 && Math.abs(x - Math.round(x)) > 1e-9) { x *= 10; d++; }
+  return d;
+}
+
+// Render [nm, Wx, Wy, Wz] tuples into a weighting-table element (textContent only).
+// Every weight in the table is formatted to the same decimal count so that, with the
+// right-aligned monospace cells, the decimal points line up across rows and columns.
+function renderWtTable(el, tuples) {
+  el.innerHTML = '';
+  const thead = document.createElement('thead'); const htr = document.createElement('tr');
+  ['nm','Wx','Wy','Wz'].forEach(h => { const th=document.createElement('th'); th.textContent=h; htr.appendChild(th); });
+  thead.appendChild(htr); el.appendChild(thead);
+  let dec = 2;
+  for (const t of tuples) for (let c = 1; c <= 3; c++) dec = Math.max(dec, fracDigits(t[c]));
+  const fmtW = v => Number.isFinite(v) ? v.toFixed(dec) : '';
+  const tb = document.createElement('tbody');
+  tuples.forEach(t => {
+    const tr=document.createElement('tr');
+    [fmtNm(t[0]), fmtW(t[1]), fmtW(t[2]), fmtW(t[3])].forEach(v => { const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  el.appendChild(tb);
+}
+function showWtEmpty(el, text) {
+  el.innerHTML = '';
+  const tb=document.createElement('tbody'); const tr=document.createElement('tr'); const td=document.createElement('td');
+  td.colSpan=4; td.className='wt-empty'; td.textContent=text; tr.appendChild(td); tb.appendChild(tr); el.appendChild(tb);
+}
+
+let regReqSeq = 0;  // guard against out-of-order async responses
+async function refreshRegistryTable() {
+  const obs = document.getElementById('set-observer').value;
+  const illum = document.getElementById('set-illuminant').value;
+  const tbl = document.getElementById('wt-reg-table');
+  const meta = document.getElementById('wt-reg-meta');
+  const seq = ++regReqSeq;
+  try {
+    const t = await getRegistryTable(obs, illum);
+    if (seq !== regReqSeq) return;                    // a newer request superseded this one
+    if (!t.ok) { meta.textContent = `— none for ${obs} + ${illum}`; showWtEmpty(tbl, `No registry LWL table for ${obs} + ${illum}.`); return; }
+    meta.textContent = `${obs} + ${illum} · ${t.start}–${t.end} nm @ ${t.step} nm (${t.bands} bands, Y=100)`;
+    renderWtTable(tbl, t.rows);
+  } catch (e) {
+    if (seq !== regReqSeq) return;
+    meta.textContent = ''; showWtEmpty(tbl, 'Failed to load registry table.');
+  }
+}
+
+function renderLoadedTable() {
+  const tbl = document.getElementById('wt-load-table');
+  const meta = document.getElementById('wt-load-meta');
+  const clearBtn = document.getElementById('btn-clear-table');
+  if (!loadedTable) { meta.textContent=''; showWtEmpty(tbl, 'No table loaded.'); clearBtn.disabled = true; return; }
+  meta.textContent = `${loadedTable.fileName} · ${loadedTable.start}–${loadedTable.end} nm @ ${loadedTable.step} nm (${loadedTable.steps} bands)`;
+  renderWtTable(tbl, loadedTable.rows.map(p => [p.nm, p.wx, p.wy, p.wz]));
+  clearBtn.disabled = false;
+}
+
+// Parse a "nm, Wx, Wy, Wz" CSV (a header row is allowed). Validates a constant
+// wavelength spacing (1/5/10 nm) and reports the exact offending row otherwise.
+function parseWeightCSV(text) {
+  const lines = text.split(/\r\n|\r|\n/);
+  const pts = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(/[\s,;]+/).filter(s => s.length);
+    const nums = parts.slice(0, 4).map(Number);
+    const allNum = parts.length >= 4 && nums.every(Number.isFinite);
+    if (!allNum) {
+      if (pts.length === 0) continue;                 // tolerate a single header/preamble line up front
+      return { ok:false, error:`line ${i+1}: expected 4 numbers “nm, Wx, Wy, Wz”, got “${line}”.` };
+    }
+    pts.push({ nm:nums[0], wx:nums[1], wy:nums[2], wz:nums[3], line:i+1 });
+  }
+  if (pts.length < 2) return { ok:false, error:'need at least 2 rows of “nm, Wx, Wy, Wz”.' };
+
+  const step = pts[1].nm - pts[0].nm;
+  if (!(step > 0))
+    return { ok:false, error:`wavelengths must increase (line ${pts[0].line}: ${pts[0].nm} nm, line ${pts[1].line}: ${pts[1].nm} nm).` };
+  const TOL = 1e-6;
+  for (let i = 2; i < pts.length; i++) {
+    const d = pts[i].nm - pts[i-1].nm;
+    if (Math.abs(d - step) > TOL)
+      return { ok:false, error:`inconsistent spacing — ${step} nm elsewhere but ${(+d.toFixed(4))} nm between ${pts[i-1].nm} and ${pts[i].nm} nm (line ${pts[i].line}). Every row must use the same spacing.` };
+  }
+  if (![1, 5, 10].includes(step))
+    return { ok:false, error:`spacing is ${step} nm; only 1, 5, or 10 nm are supported (must match the Registry LWL grid family).` };
+
+  const weights = [...pts.map(p=>p.wx), ...pts.map(p=>p.wy), ...pts.map(p=>p.wz)];   // Wx,Wy,Wz blocks
+  return { ok:true, start:pts[0].nm, end:pts[pts.length-1].nm, steps:pts.length, step, rows:pts, weights };
+}
+
+const fileLoadTable = document.getElementById('file-load-table');
+document.getElementById('btn-load-table').addEventListener('click', () => fileLoadTable.click());
+fileLoadTable.addEventListener('change', async () => {
+  if (!fileLoadTable.files.length) return;
+  const f = fileLoadTable.files[0];
+  fileLoadTable.value = '';                            // allow re-selecting the same file later
+  let text;
+  try { text = await f.text(); } catch (e) { setMsg('wt-load-msg', 'Could not read file: ' + e.message, 'err'); return; }
+  const r = parseWeightCSV(text);
+  if (!r.ok) { setMsg('wt-load-msg', 'Load refused — ' + r.error, 'err'); return; }
+  loadedTable = { ...r, fileName: f.name };
+  setMsg('wt-load-msg', `Loaded ${r.steps} rows, ${r.start}–${r.end} nm @ ${r.step} nm.`, 'ok');
+  renderLoadedTable();
+});
+document.getElementById('btn-clear-table').addEventListener('click', () => {
+  loadedTable = null; setMsg('wt-load-msg', '', ''); renderLoadedTable();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Convert
 // ─────────────────────────────────────────────────────────────────────────────
 async function runConvert(msgId) {
   if (!file) return;
   const settings = gatherSettings();
+  if (settings.method === 'LoadTable' && !loadedTable) {
+    setMsg(msgId, 'Load a weight table first (Setup → Weighting tables → “Load table…”).', 'err');
+    return;
+  }
   const divisor = settings.scale === '100' ? 100 : settings.scale === '1' ? 1 : (file.maxRefl > 2 ? 100 : 1);
 
   // Build normalized reflectance rows (fraction 0–1) in nm order.
@@ -409,6 +547,9 @@ async function runConvert(msgId) {
                 settings: { observer:settings.observer, illuminant:settings.illuminant, method:settings.method,
                             interp:settings.interp, extend:settings.extend, kind:settings.kind },
                 data };
+  if (settings.method === 'LoadTable')
+    req.loadedTable = { start:loadedTable.start, end:loadedTable.end,
+                        steps:loadedTable.steps, weights:loadedTable.weights };
   setMsg(msgId, 'Converting…', '');
   try {
     const r = await convertSpectral(req);

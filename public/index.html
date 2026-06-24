@@ -35,6 +35,7 @@
   .wrap { max-width:980px; margin:0 auto; padding:18px 20px 60px; }
   header.app { margin-bottom:14px; }
   header.app h1 { margin:0; font-size:22px; letter-spacing:.5px; }
+  header.app h1 .ver { font-size:12px; font-weight:normal; letter-spacing:0; color:var(--muted); vertical-align:middle; }
   header.app .sub { color:var(--muted); font-size:12px; margin-top:2px; }
   header.app .sub code { font-family:var(--font-mono); }
 
@@ -113,6 +114,15 @@
   table.data th.calc, table.data td.calc { background:var(--accent-tint); }
   table.data th.calc { color:var(--accent-strong); }
 
+  /* Weighting-table display (Registry LWL + loaded), side by side */
+  .wt-tables { display:flex; gap:18px; flex-wrap:wrap; }
+  .wt-col { flex:1 1 280px; min-width:260px; }
+  .wt-col h3 { margin:0 0 8px; }
+  .wt-meta { font-weight:normal; color:var(--muted); font-size:11px; text-transform:none; letter-spacing:0; }
+  .wt-scroll { max-height:340px; }
+  .wt-scroll table.data { width:100%; }
+  .wt-empty { color:var(--muted); font-size:12px; padding:10px; }
+
   /* settings blade */
   .blade {
     position:fixed; top:0; right:0; width:230px; height:100vh; background:var(--surface);
@@ -173,6 +183,11 @@
   .help-body dd { margin:3px 0 0; }
   .help-body ul { margin:6px 0; padding-left:20px; }
   .help-body li { margin:4px 0; }
+  .help-body pre {
+    font-family:var(--font-mono); font-size:11px; background:var(--surface-alt);
+    border:1px solid var(--border); border-radius:var(--radius); padding:8px 10px;
+    margin:8px 0; overflow:auto; white-space:pre;
+  }
   .help-body code {
     font-family:var(--font-mono); font-size:12px;
     background:var(--surface-alt); border:1px solid var(--border);
@@ -190,7 +205,7 @@
 <body>
 <div class="wrap">
   <header class="app">
-    <h1>spectral</h1>
+    <h1>spectral <span class="ver">v1.0.0</span></h1>
     <div class="sub">Spectral-to-colorimetry via iccDEV <code>IccColorimetry</code> (WASM) ·
       <span id="lib-ver">…</span></div>
   </header>
@@ -241,6 +256,31 @@
       <div id="caveat" class="note caveat"></div>
       <div style="margin-top:16px"><button class="btn primary" id="btn-convert">Convert</button></div>
       <div id="setup-msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Weighting tables</h2>
+      <p class="note">The 3-channel (X̄·I, Ȳ·I, Z̄·I) weighting operators used by the table methods.
+      The <strong>Registry LWL table</strong> tracks the current Observer + Illuminant; the
+      <strong>Loaded table</strong> is your CSV. The <em>Loaded weight table</em> method applies the
+      loaded one. A loaded CSV is <code>nm, Wx, Wy, Wz</code> per row (a header row is allowed); the
+      wavelength spacing must be constant (1, 5, or 10 nm) and aligned to the registry grid.</p>
+      <div class="wt-tables">
+        <div class="wt-col">
+          <h3>Registry LWL table <span class="wt-meta" id="wt-reg-meta"></span></h3>
+          <div class="tablewrap wt-scroll"><table class="data wt-table" id="wt-reg-table"></table></div>
+        </div>
+        <div class="wt-col">
+          <h3>Loaded table <span class="wt-meta" id="wt-load-meta"></span></h3>
+          <div style="margin-bottom:8px">
+            <button class="btn" id="btn-load-table" type="button">Load table…</button>
+            <button class="btn" id="btn-clear-table" type="button" disabled>Clear</button>
+            <input type="file" id="file-load-table" accept=".csv,.txt,text/csv,text/plain" hidden>
+          </div>
+          <div id="wt-load-msg" class="note"></div>
+          <div class="tablewrap wt-scroll"><table class="data wt-table" id="wt-load-table"></table></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -333,18 +373,43 @@
           directly. Fixed grid <strong>380–780 nm @ 10 nm (41 bands)</strong>; your data must
           already be on that grid — it does not resample. This is the registry's authoritative
           result.</li>
+          <li><strong>Loaded weight table</strong> — applies a weighting table you load from a CSV
+          (via iccDEV's <code>icXYZCalcLoadedTable</code>), in the same 3-channel (Wx, Wy, Wz)
+          form as the registry table. Your data must sit on the loaded table's grid; end bands are
+          extended per End handling. See the <em>Weighting tables</em> section below the parameters.</li>
         </ul>
       </dd>
 
       <dt>Interpolation</dt>
       <dd>How spectra are resampled onto the integration grid (<code>Linear</code> /
-      <code>Cubic</code> / <code>Sprague</code>). Disabled for the registry table, which maps
-      band-for-band and has nothing to interpolate.</dd>
+      <code>Cubic</code> / <code>Sprague</code>). Shown as <code>N/A</code> for the table methods
+      (Registry LWL and Loaded table), which map band-for-band and have nothing to interpolate.</dd>
 
       <dt>End handling</dt>
       <dd>How a spectrum is extended past its measured ends when the integration grid is wider:
       <strong>Hold</strong> repeats the end value (ICC-recommended); <strong>Linear</strong>
-      extrapolates from the last two samples. Disabled for the registry table.</dd>
+      extrapolates from the last two samples. Available for every method, including the table
+      methods — the app extends your data to the table grid before applying the weights.</dd>
+
+      <dt>Weighting tables</dt>
+      <dd>Below the parameters, this section shows the 3-channel weighting operators the table
+      methods use. <strong>Registry LWL table</strong> reflects the current Observer + Illuminant.
+      <strong>Loaded table</strong> is loaded from a CSV via the <em>Load table…</em> button.
+      <p style="margin:6px 0">The CSV is <strong>one row per wavelength</strong>, each row carrying
+      four numbers — <code>nm, Wx, Wy, Wz</code> — the wavelength followed by its three weights
+      (the X̄·I, Ȳ·I, Z̄·I channels, the same form as the registry table). Fields may be separated
+      by commas, whitespace, semicolons, or tabs; an optional header row and <code>#</code> comment
+      lines are ignored. For example:</p>
+      <pre>nm, Wx, Wy, Wz
+380, 0.0014266, 0.0000398, 0.0067387
+390, 0.0042243, 0.0001179, 0.0200440
+400, 0.0143810, 0.0003960, 0.0685100
+…
+780, 0.0001219, 0.0000440, 0.0000000</pre>
+      <p style="margin:6px 0">The wavelengths are <strong>presumed uniformly spaced</strong>: the
+      grid (start, end, and spacing) is read directly from the <code>nm</code> column. The spacing
+      must be constant and 1, 5, or 10 nm — if any row breaks the spacing, or it isn't 1/5/10 nm,
+      the load is refused and the offending row is identified.</p></dd>
 
       <dt>Reflectance scale</dt>
       <dd>Input units only: <code>Auto-detect</code> (percent if any value &gt; 2, else fraction),

@@ -88,6 +88,79 @@ static json errObj(const std::string& msg) {
   return json{{"ok", false}, {"error", msg}};
 }
 
+// ── weighting-table grid fitting (shared by Registry LWL + Loaded table paths) ──
+// Both table methods apply a fixed weighting table band-for-band (no resampling), so
+// the measurement must share the table's interval and align to its grid. When the
+// data covers only a sub-range, the missing end bands are filled by extending the
+// measurement (Hold = constant, ICC TN-06 §3; Linear = extrapolate the two end
+// samples). This is done here in the app, not in iccDEV.
+
+struct GridFit {
+  bool ok = false;
+  long shift = 0;            // table band m maps to data index (m + shift)
+  int  heldLow = 0, heldHigh = 0;
+  std::string error;
+};
+
+// Validate that data on [startNm,endNm]/steps fits the table grid tblRange and, if so,
+// return the index shift plus how many end bands must be extended.
+static GridFit fitToGrid(double startNm, double endNm, int steps,
+                         const icSpectralRange& tblRange) {
+  GridFit gf;
+  const int    tblSteps = (int)tblRange.steps;
+  const double tStart   = icF16toF(tblRange.start), tEnd = icF16toF(tblRange.end);
+  const double tblStep  = (tblSteps > 1) ? (tEnd - tStart) / (tblSteps - 1) : 0.0;
+  const double dataStep = (steps    > 1) ? (endNm - startNm) / (steps    - 1) : 0.0;
+  const double shiftReal = (tblStep > 0) ? (tStart - startNm) / tblStep : 0.0;
+  const long   shift     = std::lround(shiftReal);
+  if (steps < 2 || tblStep <= 0 ||
+      std::fabs(dataStep - tblStep) > 0.5 ||
+      std::fabs(shiftReal - (double)shift) > 0.05) {
+    char buf[260];
+    snprintf(buf, sizeof(buf),
+             "needs data on the %.0f-%.0f nm / %.0f nm grid and aligned to it; got "
+             "%.0f-%.0f nm @ %d bands (%.2f nm step). Resample, or use the "
+             "Weighting/Sprague method.",
+             tStart, tEnd, tblStep, startNm, endNm, steps, dataStep);
+    gf.error = buf;
+    return gf;
+  }
+  if (endNm < tStart - 0.5 || startNm > tEnd + 0.5) {
+    gf.error = "measurement range does not overlap the table grid";
+    return gf;
+  }
+  for (int m = 0; m < tblSteps; ++m) {
+    long j = (long)m + shift;
+    if (j < 0) ++gf.heldLow; else if (j >= steps) ++gf.heldHigh;
+  }
+  gf.ok = true;
+  gf.shift = shift;
+  return gf;
+}
+
+// Project a measured row onto the table grid, extending past the measured ends with
+// the chosen end-handling mode.
+static void extendToGrid(const std::vector<icFloatNumber>& src, int steps, int tblSteps,
+                         long shift, icSpectralExtendMethod extend,
+                         std::vector<icFloatNumber>& dst) {
+  dst.resize(tblSteps);
+  for (int m = 0; m < tblSteps; ++m) {
+    long j = (long)m + shift;
+    if (j >= 0 && j < steps) { dst[m] = src[(size_t)j]; continue; }
+    if (extend == icSpectralExtendLinear && steps >= 2) {
+      if (j < 0) {                          // extrapolate below the first sample
+        double slope = (double)src[1] - (double)src[0];
+        dst[m] = (icFloatNumber)((double)src[0] + slope * (double)j);
+      } else {                              // extrapolate above the last sample
+        double slope = (double)src[steps - 1] - (double)src[steps - 2];
+        dst[m] = (icFloatNumber)((double)src[steps - 1] + slope * (double)(j - (steps - 1)));
+      }
+    } else {                               // Hold: repeat the nearest measured value
+      dst[m] = (j < 0) ? src[0] : src[(size_t)(steps - 1)];
+    }
+  }
+}
+
 // ── capabilities ─────────────────────────────────────────────────────────────
 // Reflects what iccDEV actually has data for, queried live where possible.
 
@@ -95,7 +168,7 @@ static std::string getCapabilities() {
   json j;
   j["libraryVersion"] = ICCPROFLIBVER;
   j["observers"] = json::array({"1931", "1964"});
-  j["methods"]   = json::array({"DirectSum", "Weighting", "Sprague", "RegistryTable"});
+  j["methods"]   = json::array({"DirectSum", "Weighting", "Sprague", "RegistryTable", "LoadTable"});
   j["interp"]    = json::array({"Linear", "Cubic", "Sprague"});
   j["extend"]    = json::array({"Hold", "Linear"});
   j["kinds"]     = json::array({"reflectance", "emissive"});
@@ -136,6 +209,32 @@ static std::string getCapabilities() {
       "The 10 nm registry weighting tables are provisional (pending CIE TC1-101 "
       "verification) and carry the registry's Y=100 normalization, unlike the "
       "calculator's relative Y=1 path.";
+  return j.dump();
+}
+
+// ── registry weighting-table dump (for display) ──────────────────────────────
+// Returns the baked-in registry LWL table for (observer, illuminant) as a list of
+// [nm, Wx, Wy, Wz] rows so the UI can display it alongside a loaded table.
+
+static std::string getRegistryTable(const std::string& obsS, const std::string& illumS) {
+  icStandardObserver obs;
+  if (!mapObserver(obsS, obs)) return errObj("unknown observer: " + obsS).dump();
+  icColorimetryWeightingIlluminant we;
+  if (!mapWtIlluminant(illumS, we))
+    return errObj("illuminant " + illumS + " has no registry weighting table").dump();
+  icSpectralRange r;
+  const icFloatNumber* w = CIccColorimetricCalculator::GetRegistryWeightingTable(obs, we, r);
+  if (!w)
+    return errObj("no registry weighting table for observer " + obsS +
+                  " + illuminant " + illumS).dump();
+  const int n = (int)r.steps;
+  const double start = icF16toF(r.start), end = icF16toF(r.end);
+  const double step  = (n > 1) ? (end - start) / (n - 1) : 0.0;
+  json rows = json::array();
+  for (int m = 0; m < n; ++m)
+    rows.push_back(json::array({start + step * m, w[m], w[n + m], w[2 * n + m]}));
+  json j{{"ok", true}, {"observer", obsS}, {"illuminant", illumS},
+         {"start", start}, {"end", end}, {"step", step}, {"bands", n}, {"rows", rows}};
   return j.dump();
 }
 
@@ -219,8 +318,26 @@ static std::string convertSpectral(const std::string& reqJson) {
     labArr.push_back(json::array({lab[0], lab[1], lab[2]}));
   };
 
+  // Describe how end bands were extended (shared message for both table methods).
+  auto noteHeld = [&](const GridFit& gf, const icSpectralRange& tblRange) {
+    if (!gf.heldLow && !gf.heldHigh) return;
+    const char* how = (extend == icSpectralExtendLinear) ? "Linearly extrapolated"
+                                                         : "Held the nearest measured value";
+    char buf[260];
+    snprintf(buf, sizeof(buf),
+             "%s to fill %d band(s) at the short end and %d at the long end of the "
+             "%.0f-%.0f nm table grid (%s, ICC TN-06 §3).",
+             how, gf.heldLow, gf.heldHigh,
+             icF16toF(tblRange.start), icF16toF(tblRange.end),
+             (extend == icSpectralExtendLinear) ? "linear extrapolation" : "constant extrapolation");
+    warnings.push_back(std::string(buf));
+  };
+
   if (methodS == "RegistryTable") {
     // --- registry baked-in LWL weighting table path (Y=100) ---
+    // The table is on a fixed grid (380-780 @ 10 nm = 41 bands). icApplyWeightingTable
+    // maps band-for-band and does NOT resample, so the data must share the table's
+    // interval and align to its grid; missing end bands are extended per `extend`.
     icColorimetryWeightingIlluminant we;
     if (!mapWtIlluminant(illumS, we))
       return errObj("illuminant " + illumS + " has no registry weighting table").dump();
@@ -230,70 +347,69 @@ static std::string convertSpectral(const std::string& reqJson) {
       return errObj("no registry weighting table for observer " + obsS +
                     " + illuminant " + illumS).dump();
 
-    // The table is on a fixed grid (380-780 @ 10 nm = 41 bands). icApplyWeightingTable
-    // maps band-for-band and does NOT resample, so the data must share the table's
-    // interval and be aligned to its grid. We do not interpolate. If the data covers
-    // only a sub-range of the table, the missing end band(s) are filled by holding the
-    // nearest measured value -- constant extrapolation, per ICC TN-06 section 3 -- so
-    // e.g. 380-730 nm @ 10 nm data is auto-extended across 740-780 nm.
-    const int    tblSteps = (int)tblRange.steps;
-    const double tStart   = icF16toF(tblRange.start), tEnd = icF16toF(tblRange.end);
-    const double tblStep  = (tblSteps > 1) ? (tEnd - tStart) / (tblSteps - 1) : 0.0;
-    const double dataStep = (steps   > 1) ? (endNm - startNm) / (steps   - 1) : 0.0;
-
-    // Data must match the table interval and start on one of its bands. shift is the
-    // table->data index offset: data index for table band m is (m + shift).
-    const double shiftReal = (tblStep > 0) ? (tStart - startNm) / tblStep : 0.0;
-    const long   shift     = std::lround(shiftReal);
-    if (steps < 2 || tblStep <= 0 ||
-        std::fabs(dataStep - tblStep) > 0.5 ||
-        std::fabs(shiftReal - (double)shift) > 0.05) {
-      char buf[220];
-      snprintf(buf, sizeof(buf),
-               "RegistryTable needs data on the %.0f-%.0f nm / %.0f nm grid and aligned to it; "
-               "got %.0f-%.0f nm @ %d bands (%.2f nm step). Resample, or use the Weighting/Sprague method.",
-               tStart, tEnd, tblStep, startNm, endNm, steps, dataStep);
-      return errObj(buf).dump();
-    }
-    if (endNm < tStart - 0.5 || startNm > tEnd + 0.5)
-      return errObj("RegistryTable: measurement range does not overlap the registry grid").dump();
-
+    GridFit gf = fitToGrid(startNm, endNm, steps, tblRange);
+    if (!gf.ok)
+      return errObj("RegistryTable " + gf.error).dump();
+    const int tblSteps = (int)tblRange.steps;
     normalization = "Y=100";
-
-    // Map each table band m to data index (m + shift), holding the nearest end value
-    // for bands that fall outside the measured range.
-    auto holdToGrid = [&](const std::vector<icFloatNumber>& src, std::vector<icFloatNumber>& dst) {
-      dst.resize(tblSteps);
-      for (int m = 0; m < tblSteps; ++m) {
-        long j = (long)m + shift;
-        if (j < 0) j = 0; else if (j >= steps) j = steps - 1;
-        dst[m] = src[(size_t)j];
-      }
-    };
-
-    // Warn (once) if any bands had to be held to fill the grid.
-    int heldLow = 0, heldHigh = 0;
-    for (int m = 0; m < tblSteps; ++m) {
-      long j = (long)m + shift;
-      if (j < 0) ++heldLow; else if (j >= steps) ++heldHigh;
-    }
-    if (heldLow || heldHigh) {
-      char buf[240];
-      snprintf(buf, sizeof(buf),
-               "Held the nearest measured value to fill %d band(s) at the short end and %d at the "
-               "long end of the %.0f-%.0f nm registry grid (constant extrapolation, ICC TN-06).",
-               heldLow, heldHigh, tStart, tEnd);
-      warnings.push_back(std::string(buf));
-    }
+    noteHeld(gf, tblRange);
 
     std::vector<icFloatNumber> unitFull((size_t)tblSteps, (icFloatNumber)1.0);  // perfect diffuser on the table grid
     icApplyWeightingTable(tblRange, w, unitFull.data(), whiteXYZ);              // adopted white (Y~100)
 
     std::vector<icFloatNumber> padded;
     for (const auto& row : rows) {
-      holdToGrid(row, padded);
+      extendToGrid(row, steps, tblSteps, gf.shift, extend, padded);
       icFloatNumber xyz[3];
       icApplyWeightingTable(tblRange, w, padded.data(), xyz);
+      finishRow(xyz);
+    }
+  } else if (methodS == "LoadTable") {
+    // --- caller-supplied weighting table via CIccColorimetricCalculator ---
+    // The loaded table is the complete 3xN (Wx,Wy,Wz) operator on its own grid; the
+    // calculator's icXYZCalcLoadedTable applies it band-for-band and requires the data
+    // to sit on exactly that grid, so (as for RegistryTable) we extend the data to the
+    // table grid per `extend`, then convert. Observer/illuminant are folded into the
+    // table, so the Setup observer/illuminant selectors do not affect this path.
+    if (!req.contains("loadedTable"))
+      return errObj("LoadTable method requires a loaded weighting table").dump();
+    const json& jt = req["loadedTable"];
+    double tStart = jt.value("start", 0.0);
+    double tEnd   = jt.value("end", 0.0);
+    int    tSteps = jt.value("steps", 0);
+    if (tSteps < 2 || tSteps > 4096 || !(tEnd > tStart))
+      return errObj("loaded table grid is invalid (need >=2 bands, end > start)").dump();
+    if (!jt.contains("weights") || !jt["weights"].is_array() ||
+        (int)jt["weights"].size() != 3 * tSteps)
+      return errObj("loaded table must carry 3*bands weights (Wx,Wy,Wz blocks)").dump();
+    std::vector<icFloatNumber> weights(3 * tSteps);
+    for (int k = 0; k < 3 * tSteps; ++k)
+      weights[k] = (icFloatNumber)jt["weights"][k].get<double>();
+
+    icSpectralRange tblRange = makeRange(tStart, tEnd, (unsigned)tSteps);
+    CIccColorimetricCalculator calc;
+    if (!calc.LoadWeightingTable(tblRange, weights.data()))
+      return errObj("iccDEV rejected the loaded weighting table (check the grid, "
+                    "finiteness, and that magnitudes are within the registry-derived "
+                    "ceiling)").dump();
+
+    GridFit gf = fitToGrid(startNm, endNm, steps, tblRange);
+    if (!gf.ok)
+      return errObj("LoadTable " + gf.error).dump();
+    if (!calc.Prepare(tblRange, icXYZCalcLoadedTable, interp, extend))
+      return errObj("Prepare failed for the loaded weighting table").dump();
+    normalization = "loaded";
+    noteHeld(gf, tblRange);
+
+    std::vector<icFloatNumber> unitFull((size_t)tSteps, (icFloatNumber)1.0);  // perfect diffuser on the table grid
+    if (!calc.ReflectanceToXYZ(unitFull.data(), whiteXYZ))
+      return errObj("ReflectanceToXYZ failed for adopted white").dump();
+
+    std::vector<icFloatNumber> padded;
+    for (const auto& row : rows) {
+      extendToGrid(row, steps, tSteps, gf.shift, extend, padded);
+      icFloatNumber xyz[3];
+      calc.ReflectanceToXYZ(padded.data(), xyz);
       finishRow(xyz);
     }
   } else if (kindS == "emissive") {
@@ -363,5 +479,6 @@ static std::string convertSpectral(const std::string& reqJson) {
 
 EMSCRIPTEN_BINDINGS(spectral) {
   emscripten::function("getCapabilities", &getCapabilities);
+  emscripten::function("getRegistryTable", &getRegistryTable);
   emscripten::function("convertSpectral", &convertSpectral);
 }

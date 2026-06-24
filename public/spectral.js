@@ -10,7 +10,7 @@
 // returning browser would keep an old spectral.wasm. build-wasm.sh stamps the
 // wasm content hash here, giving each build a unique ?v= URL that bypasses the
 // stale cache while keeping the immutable caching benefit. ('dev' = unbuilt.)
-const WASM_VERSION = '63b24ba554e9';
+const WASM_VERSION = '60bb2c7913ec';
 
 let modulePromise = null;
 
@@ -35,6 +35,15 @@ export function preload() { loadModule().catch(() => {}); }
 export async function getCapabilities() {
   const m = await loadModule();
   return JSON.parse(m.getCapabilities());
+}
+
+/**
+ * Fetch a baked-in registry LWL weighting table for (observer, illuminant) as
+ * { ok, start, end, step, bands, rows:[[nm,Wx,Wy,Wz],...] }, or { ok:false, error }.
+ */
+export async function getRegistryTable(observer, illuminant) {
+  const m = await loadModule();
+  return JSON.parse(m.getRegistryTable(observer, illuminant));
 }
 
 /**

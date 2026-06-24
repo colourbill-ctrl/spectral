@@ -30,9 +30,10 @@ are ported from chardata.
 ## iccDEV source (pinned)
 
 Built against the spectral worktree at **`/home/colour/code/iccdev-spectral`**
-(detached HEAD at `dfe934fc`, which carries `IccColorimetry.h/.cpp`). Override with
-`ICCDEV_ROOT`. Do **not** build against `/home/colour/code/iccdev` — that checkout
-switches branches and lacks the spectral code.
+(detached HEAD at `6b398a65`, the "Loaded Weight Table reduction method" commit on
+`feature/colorimetry-loaded-weighting-table`, which carries `IccColorimetry.h/.cpp`).
+Override with `ICCDEV_ROOT`. Do **not** build against `/home/colour/code/iccdev` — that
+checkout switches branches.
 
 > The 10 nm registry weighting tables are provisional (pending CIE TC1-101) and
 > use a Y=100 normalization, unlike the calculator's relative Y=1 path.
@@ -57,6 +58,14 @@ npm start            # http://127.0.0.1:3002  (override with PORT=...)
 | Weighting     | `CIccColorimetricCalculator` `icXYZCalcWeighting`       | Y=1 |
 | Sprague       | `CIccColorimetricCalculator` `icXYZCalcSpragueTo1nm`    | Y=1 |
 | RegistryTable | `icGetColorimetryWeightingTable` + `icApplyWeightingTable` (380–780 nm @ 10 nm, 41 bands) | Y=100 |
+| LoadTable     | `CIccColorimetricCalculator::LoadWeightingTable` + `icXYZCalcLoadedTable` (a CSV-loaded `nm,Wx,Wy,Wz` table) | loaded |
+
+The two **table methods** (RegistryTable, LoadTable) apply a fixed 3-channel weighting
+table band-for-band (no resampling). The data must sit on the table's grid; the app
+extends the data to that grid past its measured ends using the **End handling** choice
+(Hold = constant / Linear = extrapolate). A loaded table comes from a CSV of `nm,Wx,Wy,Wz`
+rows (header allowed) with a constant 1/5/10 nm spacing; both tables are shown under
+Setup → *Weighting tables*.
 
 L\*a\*b\* is computed by `icXYZtoLab` against an adopted white derived by running a
 unit-reflectance vector through the same operator (so Lab is correct regardless of
@@ -64,8 +73,10 @@ the Y=1/Y=100 scale).
 
 ## Validation
 
-Verified against FOGRA51's authoritative reference Lab (D50/2°, M1): Sprague mean
-ΔE ≈ 0.009, DirectSum ≈ 0.012, Weighting ≈ 0.14 over 1617 patches.
+Cross-checked against FOGRA51's published reference Lab (D50/2°, M1) — itself a
+colorimetric reduction of the same spectra, so this is a consistency check between
+two reductions, not validation against ground truth: Sprague mean ΔE ≈ 0.009,
+DirectSum ≈ 0.012, Weighting ≈ 0.14 over 1617 patches.
 
 ## Phases
 
